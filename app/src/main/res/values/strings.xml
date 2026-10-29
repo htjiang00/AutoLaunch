@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">定时启动助手</string>
+    <string name="selected_app">已选应用</string>
+    <string name="not_selected">未选择，请点击选择</string>
+    <string name="btn_select">选择目标应用</string>
+    <string name="btn_start">启动定时服务</string>
+    <string name="btn_stop">停止定时服务</string>
+    <string name="btn_save">保存时间</string>
+    <string name="title_times">每日触发时间</string>
+    <string name="title_permissions">所需权限</string>
+    <string name="status_running">✓ 定时服务运行中</string>
+    <string name="status_stopped">○ 定时服务已停止</string>
+    <string name="notification_channel">定时启动服务</string>
+    <string name="notification_text">正在后台守护定时任务</string>
+    <string name="test_launch">立即测试</string>
+    <string name="permission_notification">通知权限 (Android 13+)</string>
+    <string name="permission_ignore_battery">忽略电池优化</string>
+    <string name="permission_exact_alarm">精确闹钟权限</string>
+    <string name="go_settings">前往设置</string>
+    <string name="app_picker_title">选择要自动打开的应用</string>
+</resources>
