@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val REQ_APP_PICKER = 1001
         private const val REQ_NOTIFY_PERM = 1002
+        private const val REQ_LOCK = 1003
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,9 +34,18 @@ class MainActivity : AppCompatActivity() {
 
         prefs = Prefs(this)
 
+        // 首次启动如果设置了 PIN 码，要求解锁
+        if (prefs.pinHash.isNotEmpty()) {
+            val lockIntent = Intent(this, LockActivity::class.java)
+            lockIntent.putExtra(LockActivity.EXTRA_CHECK_ONLY, false)
+            startActivityForResult(lockIntent, REQ_LOCK)
+        }
+
         setupTimePickers()
         loadAppSelection()
-        updateUI()
+
+        // TimePicker 改了就自动保存 + 重设闹钟（如果服务运行中）
+        setupTimePickerListeners()
 
         // 选择应用
         binding.btnSelectApp.setOnClickListener {
@@ -57,6 +67,14 @@ class MainActivity : AppCompatActivity() {
             stopScheduler()
         }
 
+        // 修改 PIN 码
+        binding.btnChangePin.setOnClickListener {
+            val lockIntent = Intent(this, LockActivity::class.java)
+            lockIntent.putExtra(LockActivity.EXTRA_CHECK_ONLY, prefs.pinHash.isNotEmpty())
+            lockIntent.putExtra(LockActivity.EXTRA_CHANGE_MODE, true)
+            startActivity(lockIntent)
+        }
+
         // 权限按钮
         binding.btnNotifyPerm.setOnClickListener { requestNotificationPermission() }
         binding.btnBatteryOpt.setOnClickListener { ignoreBatteryOptimization() }
@@ -68,6 +86,11 @@ class MainActivity : AppCompatActivity() {
                 ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY_PERM)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateUI()
     }
 
     private fun setupTimePickers() {
@@ -85,6 +108,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupTimePickerListeners() {
+        val pickers = listOf(binding.time1, binding.time2, binding.time3, binding.time4)
+        pickers.forEachIndexed { index, picker ->
+            picker.setOnTimeChangedListener { _, hour, minute ->
+                val timeStr = "%02d:%02d".format(hour, minute)
+                prefs.setTime(index, timeStr)
+                // 如果服务正在运行，重新调度闹钟
+                if (prefs.serviceRunning && prefs.targetPackage.isNotEmpty()) {
+                    AlarmScheduler.scheduleAll(this, prefs.getTimes())
+                }
+            }
+        }
+    }
+
     private fun loadAppSelection() {
         val pkg = prefs.targetPackage
         if (pkg.isNotEmpty()) {
@@ -98,27 +135,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 检查 AlarmManager 里是否真的存在我们的闹钟（比 prefs.serviceRunning 更可靠）
+     */
+    private fun hasActiveAlarms(): Boolean {
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        for (i in 0..3) {
+            val intent = Intent(this, AlarmReceiver::class.java)
+            val flags = PendingIntent.FLAG_NO_CREATE or
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            val pi = PendingIntent.getBroadcast(this, AlarmScheduler.REQUEST_CODE_BASE + i, intent, flags)
+            if (pi != null) return true
+        }
+        return false
+    }
+
     private fun updateUI() {
-        if (prefs.serviceRunning) {
+        val running = prefs.serviceRunning && hasActiveAlarms()
+        if (running) {
             binding.tvStatus.setText(R.string.status_running)
             binding.tvStatus.setTextColor(getColor(R.color.status_green))
         } else {
+            // 如果闹钟不存在了，更新 prefs 保持一致
+            if (prefs.serviceRunning) prefs.serviceRunning = false
             binding.tvStatus.setText(R.string.status_stopped)
             binding.tvStatus.setTextColor(getColor(R.color.status_red))
         }
-    }
-
-    private fun collectTimes(): List<String> {
-        val pickers = listOf(binding.time1, binding.time2, binding.time3, binding.time4)
-        val result = mutableListOf<String>()
-        pickers.forEachIndexed { index, picker ->
-            val h = picker.hour
-            val m = picker.minute
-            val timeStr = "%02d:%02d".format(h, m)
-            prefs.setTime(index, timeStr)
-            result.add(timeStr)
-        }
-        return result
+        // PIN 码设置按钮的文案
+        val hasPin = prefs.pinHash.isNotEmpty()
+        binding.btnChangePin.text = getString(if (hasPin) R.string.pin_change else R.string.pin_setup)
     }
 
     private fun startScheduler() {
@@ -145,10 +190,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopScheduler() {
         AlarmScheduler.cancelAll(this)
-        stopService(Intent(this, SchedulerService::class.java))
+        try { stopService(Intent(this, SchedulerService::class.java)) } catch (_: Exception) {}
         prefs.serviceRunning = false
         updateUI()
         Toast.makeText(this, "定时服务已停止", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun collectTimes(): List<String> {
+        val pickers = listOf(binding.time1, binding.time2, binding.time3, binding.time4)
+        val result = mutableListOf<String>()
+        pickers.forEachIndexed { index, picker ->
+            val h = picker.hour
+            val m = picker.minute
+            val timeStr = "%02d:%02d".format(h, m)
+            prefs.setTime(index, timeStr)
+            result.add(timeStr)
+        }
+        return result
     }
 
     private fun testLaunchApp() {
@@ -206,13 +264,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_APP_PICKER && resultCode == Activity.RESULT_OK && data != null) {
-            val pkg = data.getStringExtra(AppPickerActivity.EXTRA_PKG) ?: return
-            val name = data.getStringExtra(AppPickerActivity.EXTRA_NAME) ?: ""
-            prefs.targetPackage = pkg
-            prefs.targetAppName = name
-            loadAppSelection()
-            Toast.makeText(this, "已选择: $name", Toast.LENGTH_SHORT).show()
+        when (requestCode) {
+            REQ_APP_PICKER -> {
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    val pkg = data.getStringExtra(AppPickerActivity.EXTRA_PKG) ?: return
+                    val name = data.getStringExtra(AppPickerActivity.EXTRA_NAME) ?: ""
+                    prefs.targetPackage = pkg
+                    prefs.targetAppName = name
+                    loadAppSelection()
+                    Toast.makeText(this, "已选择: $name", Toast.LENGTH_SHORT).show()
+                }
+            }
+            REQ_LOCK -> {
+                if (resultCode != RESULT_OK) {
+                    // 解锁失败，退出
+                    finish()
+                }
+            }
         }
     }
 }
