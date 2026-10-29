@@ -31,6 +31,8 @@ class SchedulerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "SchedulerService 已停止")
+        // 服务被杀时更新 prefs 状态（注意：被系统强杀时 onDestroy 不一定调用）
+        Prefs(this).serviceRunning = false
     }
 
     private fun buildNotification(): Notification {
