@@ -14,7 +14,7 @@ import java.util.Calendar
 object AlarmScheduler {
 
     private const val TAG = "AlarmScheduler"
-    private const val REQUEST_CODE_BASE = 1000
+    const val REQUEST_CODE_BASE = 1000
 
     /**
      * 为四个时间点分别设置每日重复闹钟
