@@ -7,6 +7,8 @@
     <string name="btn_stop">停止定时服务</string>
     <string name="btn_save">保存时间</string>
     <string name="title_times">每日触发时间（修改后自动生效）</string>
+    <string name="title_actions">操作</string>
+    <string name="btn_diagnose">🔍 诊断</string>
     <string name="title_permissions">所需权限</string>
     <string name="status_running">✓ 定时服务运行中</string>
     <string name="status_stopped">○ 定时服务已停止</string>
