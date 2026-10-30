@@ -191,6 +191,7 @@ object AlarmScheduler {
             sb.append("【精确闹钟权限】${if (am.canScheduleExactAlarms()) "✓ 已授权" else "✗ 未授权"}\n")
         }
 
+        sb.append("【无障碍服务】${if (LauncherAccessibilityService.isEnabled(context)) "✓ 已开启（可后台启动）" else "✗ 未开启"}\n")
         sb.append("【悬浮窗权限】${if (android.provider.Settings.canDrawOverlays(context)) "✓ 已授权" else "✗ 未授权（到点弹不出应用）"}\n")
         sb.append("【服务运行标记】${prefs.serviceRunning}\n")
         sb.append("【目标应用】${prefs.targetPackage.ifEmpty { "未设置" }}\n")
