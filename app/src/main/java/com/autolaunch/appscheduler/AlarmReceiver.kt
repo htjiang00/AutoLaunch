@@ -52,7 +52,15 @@ class AlarmReceiver : BroadcastReceiver() {
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
         )
 
-        // 有悬浮窗权限 → 后台启动 Activity 被系统豁免，直接拉起
+        // 1. 无障碍服务（最稳，不需要悬浮窗权限）
+        if (LauncherAccessibilityService.isEnabled(context) &&
+            LauncherAccessibilityService.launch(launchIntent)
+        ) {
+            Log.i(TAG, "通过无障碍服务启动应用成功: $packageName")
+            return
+        }
+
+        // 2. 有悬浮窗权限 → 后台启动 Activity 被系统豁免
         if (canDrawOverlays(context)) {
             try {
                 context.startActivity(launchIntent)
@@ -63,8 +71,8 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         }
 
-        // 无悬浮窗权限 → 发全屏通知，用户点一下即可打开
-        Log.w(TAG, "无悬浮窗权限，改用通知提示")
+        // 3. 两者都没有 → 发全屏通知，用户点一下即可打开
+        Log.w(TAG, "无障碍与悬浮窗均未启用，改用通知提示")
         showLaunchNotification(context, launchIntent, time)
     }
 
