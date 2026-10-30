@@ -76,6 +76,16 @@ class MainActivity : AppCompatActivity() {
             startActivity(lockIntent)
         }
 
+        // 诊断按钮
+        binding.btnDiagnose.setOnClickListener {
+            val diag = AlarmScheduler.diagnose(this)
+            android.app.AlertDialog.Builder(this)
+                .setTitle("诊断结果")
+                .setMessage(diag)
+                .setPositiveButton("好", null)
+                .show()
+        }
+
         // 权限按钮
         binding.btnNotifyPerm.setOnClickListener { requestNotificationPermission() }
         binding.btnBatteryOpt.setOnClickListener { ignoreBatteryOptimization() }
@@ -144,19 +154,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUI() {
-        val running = prefs.serviceRunning && hasActiveAlarms()
+        val alarmCount = countActiveAlarms()
+        val running = prefs.serviceRunning && alarmCount > 0
         if (running) {
-            binding.tvStatus.setText(R.string.status_running)
+            binding.tvStatus.text = "✓ 定时服务运行中 ($alarmCount/4 闹钟)"
             binding.tvStatus.setTextColor(getColor(R.color.status_green))
         } else {
-            // 如果闹钟不存在了，更新 prefs 保持一致
             if (prefs.serviceRunning) prefs.serviceRunning = false
-            binding.tvStatus.setText(R.string.status_stopped)
+            binding.tvStatus.text = "○ 定时服务已停止 (活跃闹钟: $alarmCount/4)"
             binding.tvStatus.setTextColor(getColor(R.color.status_red))
         }
         // PIN 码设置按钮的文案
         val hasPin = prefs.pinHash.isNotEmpty()
         binding.btnChangePin.text = getString(if (hasPin) R.string.pin_change else R.string.pin_setup)
+    }
+
+    private fun countActiveAlarms(): Int {
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        var count = 0
+        for (i in 0..3) {
+            val intent = AlarmScheduler.buildIntent(this, i)
+            val pi = PendingIntent.getBroadcast(
+                this,
+                AlarmScheduler.REQUEST_CODE_BASE + i,
+                intent,
+                PendingIntent.FLAG_NO_CREATE or
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            )
+            if (pi != null) count++
+        }
+        return count
     }
 
     private fun startScheduler() {
@@ -166,7 +193,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val times = collectTimes()
-        AlarmScheduler.scheduleAll(this, times)
+        val diag = AlarmScheduler.scheduleAll(this, times)
 
         // 启动前台服务
         val svcIntent = Intent(this, SchedulerService::class.java)
@@ -178,7 +205,13 @@ class MainActivity : AppCompatActivity() {
 
         prefs.serviceRunning = true
         updateUI()
-        Toast.makeText(this, "定时服务已启动！每天 ${times.joinToString(" / ")} 自动打开目标应用", Toast.LENGTH_LONG).show()
+
+        // 显示详细设置结果
+        android.app.AlertDialog.Builder(this)
+            .setTitle("定时服务已启动")
+            .setMessage(diag + "\n当前状态: ${if (countActiveAlarms() > 0) "✓ 有活跃闹钟" else "✗ 没查到活跃闹钟！"}")
+            .setPositiveButton("好", null)
+            .show()
     }
 
     private fun stopScheduler() {
