@@ -140,15 +140,7 @@ class MainActivity : AppCompatActivity() {
      * 检查 AlarmManager 里是否真的存在我们的闹钟（比 prefs.serviceRunning 更可靠）
      */
     private fun hasActiveAlarms(): Boolean {
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        for (i in 0..3) {
-            val intent = Intent(this, AlarmReceiver::class.java)
-            val flags = PendingIntent.FLAG_NO_CREATE or
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-            val pi = PendingIntent.getBroadcast(this, AlarmScheduler.REQUEST_CODE_BASE + i, intent, flags)
-            if (pi != null) return true
-        }
-        return false
+        return AlarmScheduler.hasActiveAlarms(this)
     }
 
     private fun updateUI() {
