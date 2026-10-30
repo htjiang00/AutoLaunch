@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnNotifyPerm.setOnClickListener { requestNotificationPermission() }
         binding.btnBatteryOpt.setOnClickListener { ignoreBatteryOptimization() }
         binding.btnExactAlarm.setOnClickListener { requestExactAlarmPermission() }
+        binding.btnOverlayPerm.setOnClickListener { requestOverlayPermission() }
 
         // 自动申请通知权限 (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -146,44 +147,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * 检查 AlarmManager 里是否真的存在我们的闹钟（比 prefs.serviceRunning 更可靠）
-     */
-    private fun hasActiveAlarms(): Boolean {
-        return AlarmScheduler.hasActiveAlarms(this)
-    }
-
     private fun updateUI() {
-        val alarmCount = countActiveAlarms()
-        val running = prefs.serviceRunning && alarmCount > 0
+        // 用持久化的注册结果判断，不依赖 PendingIntent 反查（国产 ROM 不可靠）
+        val count = prefs.scheduledCount
+        val running = count > 0
         if (running) {
-            binding.tvStatus.text = "✓ 定时服务运行中 ($alarmCount/4 闹钟)"
+            val nextStr = if (prefs.nextAlarmAt > 0)
+                android.text.format.DateFormat.format("MM-dd HH:mm", prefs.nextAlarmAt).toString()
+            else "未知"
+            binding.tvStatus.text = "✓ 定时服务运行中（$count/4 闹钟，下次 $nextStr）"
             binding.tvStatus.setTextColor(getColor(R.color.status_green))
         } else {
-            if (prefs.serviceRunning) prefs.serviceRunning = false
-            binding.tvStatus.text = "○ 定时服务已停止 (活跃闹钟: $alarmCount/4)"
+            binding.tvStatus.text = "○ 定时服务已停止（活跃闹钟: 0/4）"
             binding.tvStatus.setTextColor(getColor(R.color.status_red))
         }
+        // 悬浮窗权限状态提示
+        val hasOverlay = android.provider.Settings.canDrawOverlays(this)
+        binding.btnOverlayPerm.text = if (hasOverlay)
+            "✓ 显示在其他应用上层（已开启）"
+        else
+            getString(R.string.permission_overlay)
+        binding.btnOverlayPerm.setTextColor(
+            getColor(if (hasOverlay) R.color.status_green else R.color.status_red)
+        )
         // PIN 码设置按钮的文案
         val hasPin = prefs.pinHash.isNotEmpty()
         binding.btnChangePin.text = getString(if (hasPin) R.string.pin_change else R.string.pin_setup)
-    }
-
-    private fun countActiveAlarms(): Int {
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        var count = 0
-        for (i in 0..3) {
-            val intent = AlarmScheduler.buildIntent(this, i)
-            val pi = PendingIntent.getBroadcast(
-                this,
-                AlarmScheduler.REQUEST_CODE_BASE + i,
-                intent,
-                PendingIntent.FLAG_NO_CREATE or
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-            )
-            if (pi != null) count++
-        }
-        return count
     }
 
     private fun startScheduler() {
@@ -196,20 +185,28 @@ class MainActivity : AppCompatActivity() {
         val diag = AlarmScheduler.scheduleAll(this, times)
 
         // 启动前台服务
-        val svcIntent = Intent(this, SchedulerService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(svcIntent)
-        } else {
-            startService(svcIntent)
+        try {
+            val svcIntent = Intent(this, SchedulerService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(svcIntent)
+            } else {
+                startService(svcIntent)
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
         }
 
         prefs.serviceRunning = true
         updateUI()
 
-        // 显示详细设置结果
+        // 缺悬浮窗权限时给出明确提示（否则到点拉不起应用）
+        val overlayTip = if (!android.provider.Settings.canDrawOverlays(this))
+            "\n\n⚠ 未开启「显示在其他应用上层」，到点后系统会拦截应用弹出。请点下方按钮开启。"
+        else ""
+
         android.app.AlertDialog.Builder(this)
             .setTitle("定时服务已启动")
-            .setMessage(diag + "\n当前状态: ${if (countActiveAlarms() > 0) "✓ 有活跃闹钟" else "✗ 没查到活跃闹钟！"}")
+            .setMessage(diag + overlayTip)
             .setPositiveButton("好", null)
             .show()
     }
@@ -283,6 +280,20 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
             }
+        }
+    }
+
+    private fun requestOverlayPermission() {
+        if (android.provider.Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "已开启悬浮窗权限 ✓", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "请找到「定时启动助手」并打开开关", Toast.LENGTH_LONG).show()
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName")
+                )
+            )
         }
     }
 
