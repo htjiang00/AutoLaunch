@@ -19,6 +19,10 @@
     <string name="permission_ignore_battery">忽略电池优化</string>
     <string name="permission_exact_alarm">精确闹钟权限</string>
     <string name="permission_overlay">显示在其他应用上层（必须开）</string>
+    <string name="permission_accessibility">无障碍服务（推荐，替代悬浮窗）</string>
+    <string name="a11y_label">定时启动助手</string>
+    <string name="accessibility_desc">仅用于在设定时间自动打开你指定的应用。不读取屏幕内容，不记录任何操作。</string>
+    <string name="accessibility_summary">用于后台启动指定应用</string>
     <string name="go_settings">前往设置</string>
     <string name="app_picker_title">选择要自动打开的应用</string>
     <string name="pin_setup">设置 PIN 码锁</string>
