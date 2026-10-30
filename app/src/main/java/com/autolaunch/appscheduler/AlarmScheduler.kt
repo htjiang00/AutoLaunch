@@ -10,6 +10,9 @@ import java.util.Calendar
 
 /**
  * 定时调度器 - 使用 AlarmManager 设置四个每日重复闹钟
+ *
+ * 关键设计：不依赖 PendingIntent 反查来判断状态（国产 ROM 行为不一致），
+ * 而是把实际注册结果持久化到 Prefs。
  */
 object AlarmScheduler {
 
@@ -17,7 +20,7 @@ object AlarmScheduler {
     const val REQUEST_CODE_BASE = 1000
 
     /**
-     * 构造一个与 scheduleAll 完全一致的 Intent（用于查询/取消）
+     * 构造 Intent —— 设置/取消/查询三处必须完全一致
      */
     fun buildIntent(context: Context, index: Int): Intent {
         return Intent(context, AlarmReceiver::class.java).apply {
@@ -26,28 +29,34 @@ object AlarmScheduler {
         }
     }
 
-    private fun piFlags(updatable: Boolean = true): Int {
+    private fun piFlags(updatable: Boolean): Int {
         val base = if (updatable) PendingIntent.FLAG_UPDATE_CURRENT else PendingIntent.FLAG_NO_CREATE
         return base or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
     }
 
+    fun canScheduleExact(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        return am.canScheduleExactAlarms()
+    }
+
     /**
-     * 为四个时间点分别设置每日重复闹钟
+     * 为四个时间点分别设置每日闹钟，返回可读结果
      */
     fun scheduleAll(context: Context, times: List<String>): String {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val prefs = Prefs(context)
         val result = StringBuilder()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (!am.canScheduleExactAlarms()) {
-                result.append("⚠ 没有精确闹钟权限，降级为 inexact alarm\n")
-            }
+        if (!canScheduleExact(context)) {
+            result.append("⚠ 未授予精确闹钟权限，改用非精确闹钟\n")
         }
 
-        // 先取消所有旧闹钟
-        cancelAll(context)
+        cancelAll(context, prefs)
 
         var successCount = 0
+        var earliest = Long.MAX_VALUE
+
         times.forEachIndexed { index, timeStr ->
             val parts = timeStr.split(":")
             if (parts.size != 2) return@forEachIndexed
@@ -59,7 +68,7 @@ object AlarmScheduler {
                 set(Calendar.MINUTE, minute)
                 set(Calendar.SECOND, 0)
                 set(Calendar.MILLISECOND, 0)
-                if (before(Calendar.getInstance())) {
+                if (timeInMillis <= System.currentTimeMillis()) {
                     add(Calendar.DAY_OF_YEAR, 1)
                 }
             }
@@ -75,35 +84,19 @@ object AlarmScheduler {
                 piFlags(updatable = true)
             )
 
-            val triggerAtMillis = calendar.timeInMillis
-            val triggerTimeStr = android.text.format.DateFormat.format("MM-dd HH:mm", triggerAtMillis).toString()
+            val triggerAt = calendar.timeInMillis
+            val shown = android.text.format.DateFormat.format("MM-dd HH:mm", triggerAt).toString()
 
-            try {
-                val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, pi)
-                am.setAlarmClock(alarmClockInfo, pi)
-                Log.i(TAG, "闹钟设置成功(setAlarmClock): $timeStr index=$index -> $triggerTimeStr")
-                result.append("✓ $timeStr → $triggerTimeStr (setAlarmClock)\n")
+            val ok = setOne(am, triggerAt, pi, result, timeStr, shown)
+            if (ok) {
                 successCount++
-            } catch (e: SecurityException) {
-                Log.w(TAG, "setAlarmClock 失败(SecurityException), 降级到 setExactAndAllowWhileIdle: ${e.message}")
-                try {
-                    am.setExactAndAllowWhileIdle(
-                        AlarmManager.RTC_WAKEUP,
-                        triggerAtMillis,
-                        pi
-                    )
-                    Log.i(TAG, "闹钟设置成功(setExactAndAllowWhileIdle): $timeStr index=$index")
-                    result.append("✓ $timeStr → $triggerTimeStr (setExact)\n")
-                    successCount++
-                } catch (e2: Exception) {
-                    Log.e(TAG, "setExactAndAllowWhileIdle 也失败了: ${e2.message}")
-                    result.append("✗ $timeStr 失败: ${e2.message}\n")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "setAlarmClock 未知异常: ${e.message}")
-                result.append("✗ $timeStr 异常: ${e.message}\n")
+                if (triggerAt < earliest) earliest = triggerAt
             }
         }
+
+        // 持久化注册结果
+        prefs.scheduledCount = successCount
+        prefs.nextAlarmAt = if (successCount > 0) earliest else 0L
 
         result.insert(0, "设置闹钟: $successCount/${times.size} 成功\n")
         Log.i(TAG, result.toString())
@@ -111,91 +104,99 @@ object AlarmScheduler {
     }
 
     /**
+     * 三级降级：setAlarmClock → setExactAndAllowWhileIdle → set（永不失败）
+     */
+    private fun setOne(
+        am: AlarmManager,
+        triggerAt: Long,
+        pi: PendingIntent,
+        result: StringBuilder,
+        timeStr: String,
+        shown: String
+    ): Boolean {
+        // 1. setAlarmClock：优先级最高，锁屏也会唤醒
+        if (canScheduleExactRuntime(am)) {
+            try {
+                am.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAt, pi), pi)
+                result.append("✓ $timeStr → $shown  [精确]\n")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "setAlarmClock 失败: ${e.message}")
+            }
+            // 2. setExactAndAllowWhileIdle
+            try {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+                result.append("✓ $timeStr → $shown  [精确/省电]\n")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "setExactAndAllowWhileIdle 失败: ${e.message}")
+            }
+        }
+        // 3. set：非精确闹钟，不需要特殊权限，一定成功
+        return try {
+            am.set(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            result.append("✓ $timeStr → $shown  [非精确]\n")
+            true
+        } catch (e: Exception) {
+            result.append("✗ $timeStr 失败: ${e.message}\n")
+            false
+        }
+    }
+
+    private fun canScheduleExactRuntime(am: AlarmManager): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.canScheduleExactAlarms() else true
+    }
+
+    /**
      * 取消所有闹钟
      */
-    fun cancelAll(context: Context) {
+    fun cancelAll(context: Context, prefs: Prefs = Prefs(context)) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         for (i in 0..3) {
-            val intent = buildIntent(context, i)
             val pi = PendingIntent.getBroadcast(
                 context,
                 REQUEST_CODE_BASE + i,
-                intent,
+                buildIntent(context, i),
                 piFlags(updatable = true)
             )
-            try {
-                am.cancel(pi)
-            } catch (_: Exception) {}
+            try { am.cancel(pi) } catch (_: Exception) {}
         }
+        prefs.scheduledCount = 0
+        prefs.nextAlarmAt = 0L
         Log.i(TAG, "已取消全部闹钟")
     }
 
     /**
-     * 方法1: 用 PendingIntent.FLAG_NO_CREATE 查询（Android 原生方式，但部分 ROM 行为不一致）
-     */
-    private fun checkByPendingIntent(context: Context): Pair<Int, Boolean> {
-        var found = 0
-        for (i in 0..3) {
-            val intent = buildIntent(context, i)
-            val pi = PendingIntent.getBroadcast(
-                context,
-                REQUEST_CODE_BASE + i,
-                intent,
-                piFlags(updatable = false) // FLAG_NO_CREATE
-            )
-            if (pi != null) {
-                found++
-            }
-        }
-        return Pair(found, found > 0)
-    }
-
-    /**
-     * 方法2: 用 AlarmManager.getNextAlarmClock() 查询（更可靠，API 21+）
-     * 注意: 只能查到"下一个"闹钟，且有些 ROM 上对非 setAlarmClock 设置的闹钟返回 null
-     */
-    private fun checkByNextAlarm(context: Context): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return null
-        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val next = am.nextAlarmClock ?: return null
-        val timeStr = android.text.format.DateFormat.format("MM-dd HH:mm", next.triggerTime).toString()
-        return "下一个闹钟: $timeStr"
-    }
-
-    /**
-     * 综合诊断：返回详细状态信息
+     * 综合诊断
      */
     fun diagnose(context: Context): String {
         val sb = StringBuilder()
-        val (piCount, piFound) = checkByPendingIntent(context)
-        sb.append("【PendingIntent 查询】找到 $piCount/4 个\n")
+        val prefs = Prefs(context)
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
-        val nextInfo = checkByNextAlarm(context)
-        if (nextInfo != null) {
-            sb.append("【系统下一个闹钟】$nextInfo\n")
+        sb.append("【已注册闹钟】${prefs.scheduledCount}/4\n")
+        val next = prefs.nextAlarmAt
+        if (next > 0) {
+            sb.append("【下次触发】${android.text.format.DateFormat.format("MM-dd HH:mm", next)}\n")
         } else {
-            sb.append("【系统下一个闹钟】无（可能没设，或用的不是 setAlarmClock）\n")
+            sb.append("【下次触发】无\n")
         }
 
-        // 再查一次 canScheduleExactAlarms
-        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val nac = am.nextAlarmClock
+            sb.append("【系统闹钟】${if (nac != null) android.text.format.DateFormat.format("MM-dd HH:mm", nac.triggerTime) else "无"}\n")
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             sb.append("【精确闹钟权限】${if (am.canScheduleExactAlarms()) "✓ 已授权" else "✗ 未授权"}\n")
         }
 
-        val prefs = Prefs(context)
-        sb.append("【prefs.serviceRunning】${prefs.serviceRunning}\n")
-        sb.append("【目标应用】${if (prefs.targetPackage.isNotEmpty()) prefs.targetAppName.ifEmpty { prefs.targetPackage } else "未设置"}\n")
+        sb.append("【悬浮窗权限】${if (android.provider.Settings.canDrawOverlays(context)) "✓ 已授权" else "✗ 未授权（到点弹不出应用）"}\n")
+        sb.append("【服务运行标记】${prefs.serviceRunning}\n")
+        sb.append("【目标应用】${prefs.targetPackage.ifEmpty { "未设置" }}\n")
+        sb.append("【系统版本】Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
 
         Log.i(TAG, "诊断:\n$sb")
         return sb.toString()
-    }
-
-    /**
-     * 判断闹钟是否活跃——用 PendingIntent 查询
-     */
-    fun hasActiveAlarms(context: Context): Boolean {
-        val (_, found) = checkByPendingIntent(context)
-        return found
     }
 }
