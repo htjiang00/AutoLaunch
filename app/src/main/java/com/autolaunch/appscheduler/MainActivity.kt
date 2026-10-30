@@ -91,6 +91,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnBatteryOpt.setOnClickListener { ignoreBatteryOptimization() }
         binding.btnExactAlarm.setOnClickListener { requestExactAlarmPermission() }
         binding.btnOverlayPerm.setOnClickListener { requestOverlayPermission() }
+        binding.btnAccessibility.setOnClickListener { openAccessibilitySettings() }
 
         // 自动申请通知权限 (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -169,6 +170,15 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.permission_overlay)
         binding.btnOverlayPerm.setTextColor(
             getColor(if (hasOverlay) R.color.status_green else R.color.status_red)
+        )
+        // 无障碍服务状态
+        val hasA11y = LauncherAccessibilityService.isEnabled(this)
+        binding.btnAccessibility.text = if (hasA11y)
+            "✓ 无障碍服务（已开启）"
+        else
+            getString(R.string.permission_accessibility)
+        binding.btnAccessibility.setTextColor(
+            getColor(if (hasA11y) R.color.status_green else R.color.text_secondary)
         )
         // PIN 码设置按钮的文案
         val hasPin = prefs.pinHash.isNotEmpty()
@@ -280,6 +290,15 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
             }
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        if (LauncherAccessibilityService.isEnabled(this)) {
+            Toast.makeText(this, "无障碍服务已开启 ✓", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "请在列表中找到「定时启动助手」并打开开关", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
     }
 
