@@ -17,6 +17,22 @@ object AlarmScheduler {
     const val REQUEST_CODE_BASE = 1000
 
     /**
+     * 构造一个与 scheduleAll 完全一致的 Intent（用于查询/取消）
+     * 必须和 scheduleAll 里的 Intent 一模一样，否则 PendingIntent 匹配不上！
+     */
+    fun buildIntent(context: Context, index: Int): Intent {
+        return Intent(context, AlarmReceiver::class.java).apply {
+            action = AlarmReceiver.ACTION_TRIGGER
+            putExtra(AlarmReceiver.EXTRA_INDEX, index)
+        }
+    }
+
+    private fun piFlags(updatable: Boolean = true): Int {
+        val base = if (updatable) PendingIntent.FLAG_UPDATE_CURRENT else PendingIntent.FLAG_NO_CREATE
+        return base or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+    }
+
+    /**
      * 为四个时间点分别设置每日重复闹钟
      */
     fun scheduleAll(context: Context, times: List<String>) {
@@ -48,20 +64,15 @@ object AlarmScheduler {
                 }
             }
 
-            val intent = Intent(context, AlarmReceiver::class.java).apply {
-                action = AlarmReceiver.ACTION_TRIGGER
-                putExtra(AlarmReceiver.EXTRA_INDEX, index)
+            val intent = buildIntent(context, index).apply {
                 putExtra(AlarmReceiver.EXTRA_TIME, timeStr)
             }
-
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
 
             val pi = PendingIntent.getBroadcast(
                 context,
                 REQUEST_CODE_BASE + index,
                 intent,
-                flags
+                piFlags(updatable = true)
             )
 
             val triggerAtMillis = calendar.timeInMillis
@@ -88,12 +99,37 @@ object AlarmScheduler {
     fun cancelAll(context: Context) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         for (i in 0..3) {
-            val intent = Intent(context, AlarmReceiver::class.java)
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-            val pi = PendingIntent.getBroadcast(context, REQUEST_CODE_BASE + i, intent, flags)
-            am.cancel(pi)
+            val intent = buildIntent(context, i)
+            val pi = PendingIntent.getBroadcast(
+                context,
+                REQUEST_CODE_BASE + i,
+                intent,
+                piFlags(updatable = true)
+            )
+            try {
+                am.cancel(pi)
+            } catch (_: Exception) {}
         }
         Log.i(TAG, "已取消全部闹钟")
+    }
+
+    /**
+     * 检查是否还有闹钟活着——用完全一致的 Intent 查询
+     */
+    fun hasActiveAlarms(context: Context): Boolean {
+        for (i in 0..3) {
+            val intent = buildIntent(context, i)
+            val pi = PendingIntent.getBroadcast(
+                context,
+                REQUEST_CODE_BASE + i,
+                intent,
+                piFlags(updatable = false) // FLAG_NO_CREATE = 只查询不创建
+            )
+            if (pi != null) {
+                Log.d(TAG, "检测到活跃闹钟: index=$i")
+                return true
+            }
+        }
+        return false
     }
 }
