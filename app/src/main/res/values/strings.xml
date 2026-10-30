@@ -16,6 +16,7 @@
     <string name="permission_notification">通知权限 (Android 13+)</string>
     <string name="permission_ignore_battery">忽略电池优化</string>
     <string name="permission_exact_alarm">精确闹钟权限</string>
+    <string name="permission_overlay">显示在其他应用上层（必须开）</string>
     <string name="go_settings">前往设置</string>
     <string name="app_picker_title">选择要自动打开的应用</string>
     <string name="pin_setup">设置 PIN 码锁</string>
