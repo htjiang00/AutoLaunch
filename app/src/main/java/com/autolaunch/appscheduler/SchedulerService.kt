@@ -18,11 +18,24 @@ class SchedulerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(NOTIF_ID, buildNotification())
-        Log.i(TAG, "SchedulerService 已启动")
+        // 关键：startForeground 在部分 ROM / Android 14 上可能抛 SecurityException，
+        // 一旦抛出服务会崩溃，导致状态永远显示"已停止"。必须兜住。
+        try {
+            startForeground(NOTIF_ID, buildNotification())
+            Log.i(TAG, "SchedulerService 已启动（前台）")
+        } catch (e: Throwable) {
+            Log.e(TAG, "startForeground 失败，降级为普通服务: ${e.message}")
+        }
     }
 
+    /**
+     * 每次 START_STICKY 重启后也要确保前台通知存在
+     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        try {
+            startForeground(NOTIF_ID, buildNotification())
+        } catch (_: Throwable) {}
+        Prefs(this).serviceRunning = true
         return START_STICKY
     }
 
@@ -31,8 +44,6 @@ class SchedulerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "SchedulerService 已停止")
-        // 服务被杀时更新 prefs 状态（注意：被系统强杀时 onDestroy 不一定调用）
-        Prefs(this).serviceRunning = false
     }
 
     private fun buildNotification(): Notification {
