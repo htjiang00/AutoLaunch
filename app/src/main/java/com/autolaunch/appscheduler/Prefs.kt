@@ -28,6 +28,16 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_RUNNING, false)
         set(value) = sp.edit().putBoolean(KEY_RUNNING, value).apply()
 
+    /** 本次成功注册的闹钟数量（0~4）*/
+    var scheduledCount: Int
+        get() = sp.getInt(KEY_COUNT, 0)
+        set(value) = sp.edit().putInt(KEY_COUNT, value).apply()
+
+    /** 下一次闹钟触发的绝对时间戳（毫秒），0 表示没有 */
+    var nextAlarmAt: Long
+        get() = sp.getLong(KEY_NEXT, 0L)
+        set(value) = sp.edit().putLong(KEY_NEXT, value).apply()
+
     /** PIN 码的 SHA-256 hash，空字符串表示未设置 */
     var pinHash: String
         get() = sp.getString(KEY_PIN_HASH, "") ?: ""
@@ -69,6 +79,8 @@ class Prefs(context: Context) {
         private const val KEY_APP_NAME = "target_app_name"
         private const val KEY_APP_ICON = "target_app_icon"
         private const val KEY_RUNNING = "service_running"
+        private const val KEY_COUNT = "scheduled_count"
+        private const val KEY_NEXT = "next_alarm_at"
         private const val KEY_PIN_HASH = "pin_hash"
         val DEFAULT_TIMES = listOf("08:10", "11:45", "14:10", "17:45")
 
