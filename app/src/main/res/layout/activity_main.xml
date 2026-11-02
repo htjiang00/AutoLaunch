@@ -209,6 +209,13 @@
                     style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
 
                 <Button
+                    android:id="@+id/btnFireAlarmNow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/fire_alarm_now"
+                    android:layout_marginBottom="8dp" />
+
+                <Button
                     android:id="@+id/btnStart"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
