@@ -14,12 +14,10 @@ import androidx.core.app.NotificationCompat
 /**
  * 定时闹钟触发入口 —— 自己把启动逻辑全做完，不依赖任何 Service
  *
- * 启动路径按优先级依次尝试：
+ * 启动路径（关键改进：用 PendingIntent.send 绕过 BroadcastReceiver 的受限 context）：
  *   1. 无障碍服务（如果 instance 还活着）
- *   2. BroadcastReceiver context 直接 startActivity（有悬浮窗权限时被豁免）
- *   3. 全屏通知（兜底，用户点一下即可打开）
- *
- * 同时确保 SchedulerService 在运行（前台保活），但启动逻辑本身不依赖它。
+ *   2. 悬浮窗 + PendingIntent.send —— ActivityManager 代理执行，不受 ReceiverRestrictedContext 限制
+ *   3. 全屏通知兜底 —— 用户点一下即可打开
  */
 class AlarmReceiver : BroadcastReceiver() {
 
@@ -27,12 +25,23 @@ class AlarmReceiver : BroadcastReceiver() {
         if (intent.action != ACTION_TRIGGER) return
 
         val time = intent.getStringExtra(EXTRA_TIME) ?: ""
-        Log.i(TAG, "闹钟触发! time=$time")
+        Log.i(TAG, "===== 闹钟触发 =====")
+        Log.i(TAG, "time=$time, action=${intent.action}")
 
         val prefs = Prefs(context)
 
-        // 确保前台保活服务在跑（但不依赖它做启动）
-        ensureForegroundService(context)
+        // 确保前台保活服务在跑（try-catch 保护，失败不影响本次启动）
+        try {
+            val svc = Intent(context, SchedulerService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(svc)
+            } else {
+                context.startService(svc)
+            }
+            Log.i(TAG, "SchedulerService 请求已发送")
+        } catch (e: Exception) {
+            Log.w(TAG, "前台服务启动失败（不影响本次启动）: ${e.message}")
+        }
 
         // 工作日模式：周末到点自动跳过
         if (prefs.workdaysOnly && !isWorkdayToday()) {
@@ -55,27 +64,14 @@ class AlarmReceiver : BroadcastReceiver() {
         AlarmScheduler.scheduleAll(context, prefs.getTimes())
     }
 
-    private fun ensureForegroundService(context: Context) {
-        try {
-            val svc = Intent(context, SchedulerService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(svc)
-            } else {
-                context.startService(svc)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "前台服务启动失败（不影响本次启动）: ${e.message}")
-        }
-    }
-
     /**
-     * 三级降级启动：无障碍 → 悬浮窗 → 全屏通知
+     * 三级降级启动 —— 每级都有明确的日志，方便排查
      */
     private fun launchApp(context: Context, packageName: String, time: String, prefs: Prefs) {
         val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
         if (launchIntent == null) {
             Log.e(TAG, "找不到应用启动入口: $packageName")
-            sendLaunchNotification(context, packageName, time)
+            sendLaunchNotification(context, packageName, time, "找不到应用启动入口")
             return
         }
         launchIntent.addFlags(
@@ -84,31 +80,46 @@ class AlarmReceiver : BroadcastReceiver() {
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
         )
 
+        val a11yEnabled = LauncherAccessibilityService.isEnabled(context)
+        val overlayEnabled = android.provider.Settings.canDrawOverlays(context)
+        Log.i(TAG, "权限状态: a11y=$a11yEnabled, overlay=$overlayEnabled")
+
         // 路径1：无障碍服务
-        if (LauncherAccessibilityService.isEnabled(context) &&
-            LauncherAccessibilityService.launch(launchIntent)
-        ) {
-            Log.i(TAG, "无障碍启动成功: $packageName")
-            return
+        if (a11yEnabled) {
+            val ok = LauncherAccessibilityService.launch(launchIntent)
+            Log.i(TAG, "无障碍启动结果: $ok")
+            if (ok) return
         }
 
-        // 路径2：悬浮窗权限豁免，BroadcastReceiver context 直接 startActivity
-        if (android.provider.Settings.canDrawOverlays(context)) {
+        // 路径2：悬浮窗 + PendingIntent.send
+        // PendingIntent.send 由 ActivityManager 代理执行，不受 ReceiverRestrictedContext 限制
+        if (overlayEnabled) {
             try {
-                context.startActivity(launchIntent)
-                Log.i(TAG, "悬浮窗启动成功: $packageName")
+                val pi = PendingIntent.getActivity(
+                    context,
+                    PID_LAUNCH_TARGET,
+                    launchIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                pi.send(context, 0, null)
+                Log.i(TAG, "悬浮窗 + PendingIntent.send 启动成功: $packageName")
                 return
             } catch (e: Exception) {
-                Log.w(TAG, "悬浮窗启动失败: ${e.message}")
+                Log.w(TAG, "PendingIntent.send 失败: ${e.message}")
             }
         }
 
         // 路径3：全屏通知兜底
-        Log.w(TAG, "前两条路都失败，发送通知兜底")
-        sendLaunchNotification(context, packageName, time)
+        Log.w(TAG, "前两条路都失败，发送全屏通知")
+        sendLaunchNotification(context, packageName, time, "自动启动失败，需要手动点击")
     }
 
-    private fun sendLaunchNotification(context: Context, packageName: String, time: String) {
+    private fun sendLaunchNotification(
+        context: Context,
+        packageName: String,
+        time: String,
+        reason: String
+    ) {
         val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
@@ -136,7 +147,7 @@ class AlarmReceiver : BroadcastReceiver() {
 
         val n: Notification = NotificationCompat.Builder(context, channelId)
             .setContentTitle("定时启动：$time")
-            .setContentText("点击打开目标应用")
+            .setContentText("点击打开目标应用（原因: $reason）")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(contentPi)
             .setAutoCancel(true)
@@ -155,6 +166,7 @@ class AlarmReceiver : BroadcastReceiver() {
     companion object {
         private const val TAG = "AlarmReceiver"
         private const val NOTIF_FIRE_ID = 101
+        private const val PID_LAUNCH_TARGET = 3000
         const val ACTION_TRIGGER = "com.autolaunch.appscheduler.TRIGGER"
         const val EXTRA_INDEX = "index"
         const val EXTRA_TIME = "time"
