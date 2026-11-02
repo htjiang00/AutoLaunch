@@ -2,6 +2,7 @@ package com.autolaunch.appscheduler
 
 import android.content.Context
 import android.content.SharedPreferences
+import java.security.MessageDigest
 
 /**
  * 配置存储 - 保存用户选择的目标应用、时间和 PIN 码
