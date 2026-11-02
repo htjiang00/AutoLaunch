@@ -1,7 +1,6 @@
 package com.autolaunch.appscheduler
 
 import android.accessibilityservice.AccessibilityService
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
@@ -9,13 +8,13 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * 无障碍服务 - 仅用于「从后台启动指定应用」
+ * 无障碍服务 - 两种用途：
  *
- * 用途：Android 10+ 禁止后台启动 Activity，无障碍服务是官方豁免通道之一。
- * 相比悬浮窗权限，无障碍服务不需要高危权限，也更符合厂商安全策略。
+ * 1. 优先通道：AlarmReceiver 写入 pendingLaunch 后，本服务 onServiceConnected
+ *    会检查并执行启动（不受 ReceiverRestrictedContext 限制）。
  *
- * 本服务不读取任何窗口内容（canRetrieveWindowContent=false），
- * 也不处理任何事件，只提供一个可以安全 startActivity 的上下文。
+ * 2. 备用通道：如果前台服务没跑起来，本服务的 instance 还在时，直接用它
+ *    的 context 启动目标应用。
  */
 class LauncherAccessibilityService : AccessibilityService() {
 
@@ -23,15 +22,37 @@ class LauncherAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         Log.i(TAG, "无障碍服务已连接")
+
+        // 检查 AlarmReceiver 是否写了 pendingLaunch
+        val prefs = Prefs(this)
+        val pending = prefs.consumePendingLaunch()
+        if (pending != null) {
+            val (pkg, _) = pending
+            Log.i(TAG, "无障碍服务收到 pendingLaunch: $pkg")
+            try {
+                val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+                if (launchIntent != null) {
+                    launchIntent.addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    )
+                    if (startActivity(launchIntent)) {
+                        Log.i(TAG, "✓ 无障碍服务启动成功: $pkg")
+                    } else {
+                        Log.w(TAG, "无障碍服务启动返回 false")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "无障碍服务启动失败: ${e.message}")
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 不处理任何事件
+        // 不处理任何事件（纯启动通道）
     }
 
-    override fun onInterrupt() {
-        // 不需要中断处理
-    }
+    override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
@@ -58,25 +79,21 @@ class LauncherAccessibilityService : AccessibilityService() {
                     context.contentResolver,
                     Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
                 )
-            } catch (_: Exception) {
-                null
-            } ?: return false
-
-            val target = ComponentName(context, LauncherAccessibilityService::class.java)
+            } catch (_: Exception) { null } ?: return false
+            val target = android.content.ComponentName(
+                context,
+                LauncherAccessibilityService::class.java
+            )
             return enabled.split(':').any { it.equals(target.flattenToString(), true) }
         }
 
-        /** 用无障碍服务的上下文启动应用（不受后台启动限制） */
+        /** 用无障碍服务的 context 启动应用（备用路径） */
         fun launch(intent: Intent): Boolean {
             val svc = instance ?: return false
             return try {
                 svc.startActivity(intent)
-                Log.i(TAG, "通过无障碍服务启动应用成功")
                 true
-            } catch (e: Exception) {
-                Log.e(TAG, "无障碍启动失败: ${e.message}")
-                false
-            }
+            } catch (e: Exception) { false }
         }
     }
 }
