@@ -80,6 +80,11 @@ class MainActivity : AppCompatActivity() {
             ).show()
         }
 
+        // 立即模拟闹钟触发（走完整的 AlarmReceiver 链路）
+        binding.btnFireAlarmNow.setOnClickListener {
+            simulateAlarmFire()
+        }
+
         // 修改 PIN 码
         binding.btnChangePin.setOnClickListener {
             val lockIntent = Intent(this, LockActivity::class.java)
@@ -278,6 +283,26 @@ class MainActivity : AppCompatActivity() {
         } else {
             Toast.makeText(this, "无法打开该应用", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /**
+     * 模拟闹钟触发 —— 构造和系统闹钟完全一致的 Intent，sendBroadcast 给 AlarmReceiver
+     * 这样能完整测试从广播接收 → 启动目标应用的整条链路
+     */
+    private fun simulateAlarmFire() {
+        if (prefs.targetPackage.isEmpty()) {
+            Toast.makeText(this, "请先选择目标应用", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val now = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val intent = Intent(this, AlarmReceiver::class.java).apply {
+            action = AlarmReceiver.ACTION_TRIGGER
+            putExtra(AlarmReceiver.EXTRA_INDEX, 0)
+            putExtra(AlarmReceiver.EXTRA_TIME, now)
+        }
+        sendBroadcast(intent)
+        Toast.makeText(this, "已触发模拟闹钟，请观察结果", Toast.LENGTH_SHORT).show()
     }
 
     // ========== 权限相关 ==========
