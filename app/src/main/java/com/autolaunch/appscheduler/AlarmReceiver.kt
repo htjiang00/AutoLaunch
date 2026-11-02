@@ -25,8 +25,9 @@ class AlarmReceiver : BroadcastReceiver() {
         if (intent.action != ACTION_TRIGGER) return
 
         val time = intent.getStringExtra(EXTRA_TIME) ?: ""
+        val force = intent.getBooleanExtra(EXTRA_FORCE, false)
         Log.i(TAG, "===== 闹钟触发 =====")
-        Log.i(TAG, "time=$time, action=${intent.action}")
+        Log.i(TAG, "time=$time, force=$force")
 
         val prefs = Prefs(context)
 
@@ -43,8 +44,8 @@ class AlarmReceiver : BroadcastReceiver() {
             Log.w(TAG, "前台服务启动失败（不影响本次启动）: ${e.message}")
         }
 
-        // 工作日模式：周末到点自动跳过
-        if (prefs.workdaysOnly && !isWorkdayToday()) {
+        // 工作日模式：周末到点自动跳过（手动强制触发时不受此限制）
+        if (!force && prefs.workdaysOnly && !isWorkdayToday()) {
             Log.i(TAG, "今天是周末，工作日模式开启，跳过启动")
             AlarmScheduler.scheduleAll(context, prefs.getTimes())
             return
@@ -170,6 +171,8 @@ class AlarmReceiver : BroadcastReceiver() {
         const val ACTION_TRIGGER = "com.autolaunch.appscheduler.TRIGGER"
         const val EXTRA_INDEX = "index"
         const val EXTRA_TIME = "time"
+        /** 手动强制触发标志 —— 跳过工作日判断 */
+        const val EXTRA_FORCE = "force"
 
         /** 今天是否为工作日（周一至周五）。离线版只按星期判断 */
         fun isWorkdayToday(): Boolean {
