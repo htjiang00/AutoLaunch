@@ -300,9 +300,10 @@ class MainActivity : AppCompatActivity() {
             action = AlarmReceiver.ACTION_TRIGGER
             putExtra(AlarmReceiver.EXTRA_INDEX, 0)
             putExtra(AlarmReceiver.EXTRA_TIME, now)
+            putExtra(AlarmReceiver.EXTRA_FORCE, true) // 强制触发，忽略工作日
         }
         sendBroadcast(intent)
-        Toast.makeText(this, "已触发模拟闹钟，请观察结果", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "已触发模拟闹钟（忽略工作日），请观察结果", Toast.LENGTH_SHORT).show()
     }
 
     // ========== 权限相关 ==========
