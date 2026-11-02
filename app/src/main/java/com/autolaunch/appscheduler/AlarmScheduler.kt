@@ -194,6 +194,7 @@ object AlarmScheduler {
         sb.append("【无障碍服务】${if (LauncherAccessibilityService.isEnabled(context)) "✓ 已开启（可后台启动）" else "✗ 未开启"}\n")
         sb.append("【悬浮窗权限】${if (android.provider.Settings.canDrawOverlays(context)) "✓ 已授权" else "✗ 未授权（到点弹不出应用）"}\n")
         sb.append("【服务运行标记】${prefs.serviceRunning}\n")
+        sb.append("【工作日模式】${if (prefs.workdaysOnly) "开（周六日跳过）" else "关（每天触发）"}，今天${if (AlarmReceiver.isWorkdayToday()) "是工作日" else "是周末"}\n")
         sb.append("【目标应用】${prefs.targetPackage.ifEmpty { "未设置" }}\n")
         sb.append("【系统版本】Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
 
