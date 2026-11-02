@@ -263,14 +263,9 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "请先选择要自动打开的应用", Toast.LENGTH_SHORT).show()
             return
         }
-        val intent = packageManager.getLaunchIntentForPackage(pkg)
-        if (intent != null) {
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-            Toast.makeText(this, "正在打开: ${prefs.targetAppName}", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, "无法打开该应用", Toast.LENGTH_SHORT).show()
-        }
+        // 走和到点触发完全一样的路径
+        SchedulerService.requestLaunch(this, pkg, "测试")
+        Toast.makeText(this, "正在打开: ${prefs.targetAppName}", Toast.LENGTH_SHORT).show()
     }
 
     // ========== 权限相关 ==========
