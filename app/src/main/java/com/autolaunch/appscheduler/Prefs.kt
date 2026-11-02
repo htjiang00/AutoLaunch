@@ -2,7 +2,6 @@ package com.autolaunch.appscheduler
 
 import android.content.Context
 import android.content.SharedPreferences
-import java.security.MessageDigest
 
 /**
  * 配置存储 - 保存用户选择的目标应用、时间和 PIN 码
@@ -65,6 +64,26 @@ class Prefs(context: Context) {
         pinHash = ""
     }
 
+    /**
+     * 待执行的启动请求 —— AlarmReceiver 写入，SchedulerService 或 LauncherAccessibilityService 读取
+     * 格式: "包名|时间字符串"，空表示没有待执行请求
+     */
+    var pendingLaunch: String
+        get() = sp.getString(KEY_PENDING_LAUNCH, "") ?: ""
+        set(value) = sp.edit().putString(KEY_PENDING_LAUNCH, value).apply()
+
+    fun writePendingLaunch(packageName: String, time: String) {
+        pendingLaunch = "$packageName|$time"
+    }
+
+    fun consumePendingLaunch(): Pair<String, String>? {
+        val raw = pendingLaunch
+        if (raw.isEmpty()) return null
+        val parts = raw.split("|")
+        pendingLaunch = "" // 清空
+        return if (parts.size == 2) parts[0] to parts[1] else null
+    }
+
     // 四个时间点，格式 "HH:mm"
     fun getTimes(): List<String> {
         val list = mutableListOf<String>()
@@ -88,6 +107,7 @@ class Prefs(context: Context) {
         private const val KEY_NEXT = "next_alarm_at"
         private const val KEY_PIN_HASH = "pin_hash"
         private const val KEY_WORKDAYS_ONLY = "workdays_only"
+        private const val KEY_PENDING_LAUNCH = "pending_launch"
         val DEFAULT_TIMES = listOf("08:10", "11:45", "14:10", "17:45")
 
         private fun sha256(input: String): String {
