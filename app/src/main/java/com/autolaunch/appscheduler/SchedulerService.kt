@@ -13,15 +13,13 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 
 /**
- * 前台保活服务 - 让应用不容易被系统杀掉，并在到点时执行启动目标应用
+ * 前台保活服务 —— 同时负责处理 pendingLaunch 启动请求
  *
- * 启动流程（最稳的路径）：
- *   AlarmReceiver 触发 → startService 给本服务发启动请求 → 本服务用自己的 context
- *   启动目标应用。前台服务进程存活 + context 启动 Activity 是系统豁免的后台启动通道。
+ * 启动链路（最稳的路径）：
+ *   AlarmReceiver → 写 pendingLaunch → startForegroundService 本服务
+ *   → onStartCommand → 检查 pendingLaunch → 执行启动
  *
- * 备用路径（当前两条已不可靠，仅保留参考）：
- *   - 无障碍服务：进程被杀后 instance 丢失，不处理事件系统也不会主动拉起
- *   - 悬浮窗：BroadcastReceiver 的 ReceiverRestrictedContext 部分 ROM 上仍被拦截
+ * 本服务的 context 是完整有效的 ApplicationContext，不受 ReceiverRestrictedContext 限制。
  */
 class SchedulerService : Service() {
 
@@ -40,15 +38,17 @@ class SchedulerService : Service() {
             startForeground(NOTIF_ID, buildNotification())
         } catch (_: Throwable) {}
 
-        Prefs(this).serviceRunning = true
+        val prefs = Prefs(this)
+        prefs.serviceRunning = true
 
-        // 处理启动目标应用的请求（最稳的路径：前台服务 context 启动 Activity）
-        if (intent?.action == ACTION_LAUNCH) {
-            val pkg = intent.getStringExtra(EXTRA_PKG)
-            if (!pkg.isNullOrEmpty()) {
-                val time = intent.getStringExtra(EXTRA_TIME) ?: ""
-                handleLaunchRequest(pkg, time)
-            }
+        // 检查并执行 pendingLaunch（AlarmReceiver 写入的启动请求）
+        val pending = prefs.consumePendingLaunch()
+        if (pending != null) {
+            val (pkg, time) = pending
+            Log.i(TAG, "收到 pendingLaunch 请求: $pkg | $time")
+            launchTargetApp(pkg, time)
+        } else {
+            Log.i(TAG, "无 pendingLaunch 请求")
         }
 
         return START_STICKY
@@ -62,15 +62,18 @@ class SchedulerService : Service() {
     }
 
     /**
-     * 用前台服务的 context 启动目标应用
-     * 优先级：无障碍服务 → 悬浮窗直接启动 → 全屏通知
+     * 用前台服务的 context 启动目标应用（不受 ReceiverRestrictedContext 限制）
+     *
+     * 降级链路：
+     *   1. PendingIntent.send（ActivityManager 代理执行，最稳）
+     *   2. startActivity（悬浮窗豁免时可工作）
+     *   3. 全屏通知（兜底）
      */
-    private fun handleLaunchRequest(packageName: String, time: String) {
-        val prefs = Prefs(this)
+    private fun launchTargetApp(packageName: String, time: String) {
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
         if (launchIntent == null) {
             Log.e(TAG, "找不到应用启动入口: $packageName")
-            sendLaunchNotification(prefs, packageName, time)
+            sendLaunchNotification(packageName, time, "找不到应用启动入口")
             return
         }
         launchIntent.addFlags(
@@ -79,40 +82,39 @@ class SchedulerService : Service() {
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
         )
 
-        // 路径1：无障碍服务（如果 instance 还活着）
-        if (LauncherAccessibilityService.isEnabled(this) &&
-            LauncherAccessibilityService.launch(launchIntent)
-        ) {
-            Log.i(TAG, "无障碍启动成功: $packageName")
-            return
-        }
+        val overlay = android.provider.Settings.canDrawOverlays(this)
+        Log.i(TAG, "SchedulerService 启动目标: $packageName, overlay=$overlay")
 
-        // 路径2：前台服务 context 直接 startActivity（最常用，系统豁免）
+        // 路径1：PendingIntent.send —— ActivityManager 代理执行
         try {
-            startActivity(launchIntent)
-            Log.i(TAG, "前台服务启动成功: $packageName")
+            val pi = PendingIntent.getActivity(
+                this,
+                PID_LAUNCH_TARGET,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            pi.send(this, 0, null)
+            Log.i(TAG, "✓ PendingIntent.send 启动成功")
             return
         } catch (e: Exception) {
-            Log.w(TAG, "前台服务启动失败: ${e.message}")
+            Log.w(TAG, "PendingIntent.send 失败: ${e.message}")
         }
 
-        // 路径3：悬浮窗 context 启动（备用）
-        if (android.provider.Settings.canDrawOverlays(this)) {
-            try {
-                startActivity(launchIntent)
-                Log.i(TAG, "悬浮窗启动成功: $packageName")
-                return
-            } catch (e: Exception) {
-                Log.w(TAG, "悬浮窗启动失败: ${e.message}")
-            }
+        // 路径2：直接 startActivity（前台服务 context 通常能工作）
+        try {
+            startActivity(launchIntent)
+            Log.i(TAG, "✓ startActivity 启动成功")
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "startActivity 失败: ${e.message}")
         }
 
-        // 路径4：全屏通知（兜底）
-        Log.w(TAG, "所有路径均失败，改用通知")
-        sendLaunchNotification(prefs, packageName, time)
+        // 路径3：全屏通知兜底
+        Log.w(TAG, "所有启动方式失败，发送全屏通知")
+        sendLaunchNotification(packageName, time, "自动启动被系统拦截")
     }
 
-    private fun sendLaunchNotification(prefs: Prefs, packageName: String, time: String) {
+    private fun sendLaunchNotification(packageName: String, time: String, reason: String) {
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
@@ -140,7 +142,7 @@ class SchedulerService : Service() {
 
         val n = NotificationCompat.Builder(this, channelId)
             .setContentTitle("定时启动：$time")
-            .setContentText("点击打开目标应用")
+            .setContentText("点击打开目标应用（$reason）")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(contentPi)
             .setAutoCancel(true)
@@ -150,6 +152,7 @@ class SchedulerService : Service() {
 
         try {
             nm.notify(NOTIF_FIRE_ID, n)
+            Log.i(TAG, "通知已发送")
         } catch (e: Exception) {
             Log.e(TAG, "通知发送失败: ${e.message}")
         }
@@ -183,27 +186,6 @@ class SchedulerService : Service() {
         private const val NOTIF_ID = 1
         private const val CHANNEL_ID = "auto_launch_channel"
         private const val NOTIF_FIRE_ID = 101
-
-        const val ACTION_LAUNCH = "com.autolaunch.appscheduler.LAUNCH_TARGET"
-        const val EXTRA_PKG = "package_name"
-        const val EXTRA_TIME = "trigger_time"
-
-        /** 向 SchedulerService 发送启动目标应用的请求 */
-        fun requestLaunch(context: Context, packageName: String, time: String) {
-            val intent = Intent(context, SchedulerService::class.java).apply {
-                action = ACTION_LAUNCH
-                putExtra(EXTRA_PKG, packageName)
-                putExtra(EXTRA_TIME, time)
-            }
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "无法启动 SchedulerService: ${e.message}")
-            }
-        }
+        private const val PID_LAUNCH_TARGET = 3000
     }
 }
