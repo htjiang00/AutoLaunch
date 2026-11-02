@@ -36,11 +36,8 @@ class LauncherAccessibilityService : AccessibilityService() {
                         Intent.FLAG_ACTIVITY_NEW_TASK or
                             Intent.FLAG_ACTIVITY_CLEAR_TOP
                     )
-                    if (startActivity(launchIntent)) {
-                        Log.i(TAG, "✓ 无障碍服务启动成功: $pkg")
-                    } else {
-                        Log.w(TAG, "无障碍服务启动返回 false")
-                    }
+                    startActivity(launchIntent)
+                    Log.i(TAG, "✓ 无障碍服务已发起启动: $pkg")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "无障碍服务启动失败: ${e.message}")
