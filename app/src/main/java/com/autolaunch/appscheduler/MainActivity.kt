@@ -38,7 +38,7 @@ class MainActivity : AppCompatActivity() {
         // 首次启动如果设置了 PIN 码，要求解锁
         if (prefs.pinHash.isNotEmpty()) {
             val lockIntent = Intent(this, LockActivity::class.java)
-            lockIntent.putExtra(LockActivity.EXTRA_CHECK_ONLY, false)
+            lockIntent.putExtra(LockActivity.EXTRA_CHECK_ONLY, true)
             startActivityForResult(lockIntent, REQ_LOCK)
         }
 
@@ -66,6 +66,18 @@ class MainActivity : AppCompatActivity() {
         // 停止服务
         binding.btnStop.setOnClickListener {
             stopScheduler()
+        }
+
+        // 仅工作日运行开关
+        binding.switchWorkdays.isChecked = prefs.workdaysOnly
+        binding.switchWorkdays.setOnCheckedChangeListener { _, isChecked ->
+            prefs.workdaysOnly = isChecked
+            updateUI()
+            Toast.makeText(
+                this,
+                if (isChecked) "已开启：周六日自动暂停" else "已关闭：每天都触发",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         // 修改 PIN 码
@@ -156,7 +168,10 @@ class MainActivity : AppCompatActivity() {
             val nextStr = if (prefs.nextAlarmAt > 0)
                 android.text.format.DateFormat.format("MM-dd HH:mm", prefs.nextAlarmAt).toString()
             else "未知"
-            binding.tvStatus.text = "✓ 定时服务运行中（$count/4 闹钟，下次 $nextStr）"
+            val weekendNote = if (prefs.workdaysOnly && !AlarmReceiver.isWorkdayToday())
+                "（今日周末，自动暂停）"
+            else ""
+            binding.tvStatus.text = "✓ 定时服务运行中（$count/4 闹钟，下次 $nextStr）$weekendNote"
             binding.tvStatus.setTextColor(getColor(R.color.status_green))
         } else {
             binding.tvStatus.text = "○ 定时服务已停止（活跃闹钟: 0/4）"
