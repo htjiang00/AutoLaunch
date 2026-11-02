@@ -38,6 +38,11 @@ class Prefs(context: Context) {
         get() = sp.getLong(KEY_NEXT, 0L)
         set(value) = sp.edit().putLong(KEY_NEXT, value).apply()
 
+    /** 仅工作日运行：开启后周六周日到点自动跳过，不启动目标应用 */
+    var workdaysOnly: Boolean
+        get() = sp.getBoolean(KEY_WORKDAYS_ONLY, true)
+        set(value) = sp.edit().putBoolean(KEY_WORKDAYS_ONLY, value).apply()
+
     /** PIN 码的 SHA-256 hash，空字符串表示未设置 */
     var pinHash: String
         get() = sp.getString(KEY_PIN_HASH, "") ?: ""
@@ -82,6 +87,7 @@ class Prefs(context: Context) {
         private const val KEY_COUNT = "scheduled_count"
         private const val KEY_NEXT = "next_alarm_at"
         private const val KEY_PIN_HASH = "pin_hash"
+        private const val KEY_WORKDAYS_ONLY = "workdays_only"
         val DEFAULT_TIMES = listOf("08:10", "11:45", "14:10", "17:45")
 
         private fun sha256(input: String): String {
