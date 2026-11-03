@@ -1,0 +1,390 @@
+package com.autolaunch.appscheduler
+
+import android.Manifest
+import android.app.Activity
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import com.autolaunch.appscheduler.databinding.ActivityMainBinding
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var prefs: Prefs
+
+    companion object {
+        private const val REQ_APP_PICKER = 1001
+        private const val REQ_NOTIFY_PERM = 1002
+        private const val REQ_LOCK = 1003
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        prefs = Prefs(this)
+
+        // 首次启动如果设置了 PIN 码，要求解锁
+        if (prefs.pinHash.isNotEmpty()) {
+            val lockIntent = Intent(this, LockActivity::class.java)
+            lockIntent.putExtra(LockActivity.EXTRA_CHECK_ONLY, true)
+            startActivityForResult(lockIntent, REQ_LOCK)
+        }
+
+        setupTimePickers()
+        loadAppSelection()
+
+        // TimePicker 改了就自动保存 + 重设闹钟（如果服务运行中）
+        setupTimePickerListeners()
+
+        // 选择应用
+        binding.btnSelectApp.setOnClickListener {
+            startActivityForResult(Intent(this, AppPickerActivity::class.java), REQ_APP_PICKER)
+        }
+
+        // 立即测试启动
+        binding.btnTestLaunch.setOnClickListener {
+            testLaunchApp()
+        }
+
+        // 启动定时服务
+        binding.btnStart.setOnClickListener {
+            startScheduler()
+        }
+
+        // 停止服务
+        binding.btnStop.setOnClickListener {
+            stopScheduler()
+        }
+
+        // 仅工作日运行开关
+        binding.switchWorkdays.isChecked = prefs.workdaysOnly
+        binding.switchWorkdays.setOnCheckedChangeListener { _, isChecked ->
+            prefs.workdaysOnly = isChecked
+            updateUI()
+            Toast.makeText(
+                this,
+                if (isChecked) "已开启：周六日自动暂停" else "已关闭：每天都触发",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        // 立即模拟闹钟触发（走完整的 AlarmReceiver 链路）
+        binding.btnFireAlarmNow.setOnClickListener {
+            simulateAlarmFire()
+        }
+
+        // 修改 PIN 码
+        binding.btnChangePin.setOnClickListener {
+            val lockIntent = Intent(this, LockActivity::class.java)
+            lockIntent.putExtra(LockActivity.EXTRA_CHECK_ONLY, prefs.pinHash.isNotEmpty())
+            lockIntent.putExtra(LockActivity.EXTRA_CHANGE_MODE, true)
+            startActivity(lockIntent)
+        }
+
+        // 诊断按钮
+        binding.btnDiagnose.setOnClickListener {
+            val diag = AlarmScheduler.diagnose(this)
+            android.app.AlertDialog.Builder(this)
+                .setTitle("诊断结果")
+                .setMessage(diag)
+                .setPositiveButton("好", null)
+                .show()
+        }
+
+        // 权限按钮
+        binding.btnNotifyPerm.setOnClickListener { requestNotificationPermission() }
+        binding.btnBatteryOpt.setOnClickListener { ignoreBatteryOptimization() }
+        binding.btnExactAlarm.setOnClickListener { requestExactAlarmPermission() }
+        binding.btnOverlayPerm.setOnClickListener { requestOverlayPermission() }
+        binding.btnAccessibility.setOnClickListener { openAccessibilitySettings() }
+
+        // 自动申请通知权限 (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY_PERM)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateUI()
+    }
+
+    private fun setupTimePickers() {
+        val times = prefs.getTimes()
+        val pickers = listOf(binding.time1, binding.time2, binding.time3, binding.time4)
+        pickers.forEachIndexed { index, picker ->
+            val parts = times[index].split(":")
+            if (parts.size == 2) {
+                picker.hour = parts[0].toIntOrNull() ?: 0
+                picker.minute = parts[1].toIntOrNull() ?: 0
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                picker.setIs24HourView(true)
+            }
+        }
+    }
+
+    private fun setupTimePickerListeners() {
+        val pickers = listOf(binding.time1, binding.time2, binding.time3, binding.time4)
+        pickers.forEachIndexed { index, picker ->
+            picker.setOnTimeChangedListener { _, hour, minute ->
+                val timeStr = "%02d:%02d".format(hour, minute)
+                prefs.setTime(index, timeStr)
+                // 如果服务正在运行，重新调度闹钟
+                if (prefs.serviceRunning && prefs.targetPackage.isNotEmpty()) {
+                    AlarmScheduler.scheduleAll(this, prefs.getTimes())
+                }
+            }
+        }
+    }
+
+    private fun loadAppSelection() {
+        val pkg = prefs.targetPackage
+        if (pkg.isNotEmpty()) {
+            binding.tvAppName.text = prefs.targetAppName.ifEmpty { pkg }
+            try {
+                val icon = packageManager.getApplicationIcon(pkg)
+                binding.ivAppIcon.setImageDrawable(icon)
+            } catch (_: Exception) {}
+        } else {
+            binding.tvAppName.setText(R.string.not_selected)
+        }
+    }
+
+    private fun updateUI() {
+        // 用持久化的注册结果判断，不依赖 PendingIntent 反查（国产 ROM 不可靠）
+        val count = prefs.scheduledCount
+        val running = count > 0
+        if (running) {
+            val nextStr = if (prefs.nextAlarmAt > 0)
+                android.text.format.DateFormat.format("MM-dd HH:mm", prefs.nextAlarmAt).toString()
+            else "未知"
+            val weekendNote = if (prefs.workdaysOnly && !AlarmReceiver.isWorkdayToday())
+                "（今日周末，自动暂停）"
+            else ""
+            binding.tvStatus.text = "✓ 定时服务运行中（$count/4 闹钟，下次 $nextStr）$weekendNote"
+            binding.tvStatus.setTextColor(getColor(R.color.status_green))
+        } else {
+            binding.tvStatus.text = "○ 定时服务已停止（活跃闹钟: 0/4）"
+            binding.tvStatus.setTextColor(getColor(R.color.status_red))
+        }
+        // 悬浮窗权限状态提示
+        val hasOverlay = android.provider.Settings.canDrawOverlays(this)
+        binding.btnOverlayPerm.text = if (hasOverlay)
+            "✓ 显示在其他应用上层（已开启）"
+        else
+            getString(R.string.permission_overlay)
+        binding.btnOverlayPerm.setTextColor(
+            getColor(if (hasOverlay) R.color.status_green else R.color.status_red)
+        )
+        // 无障碍服务状态
+        val hasA11y = LauncherAccessibilityService.isEnabled(this)
+        binding.btnAccessibility.text = if (hasA11y)
+            "✓ 无障碍服务（已开启）"
+        else
+            getString(R.string.permission_accessibility)
+        binding.btnAccessibility.setTextColor(
+            getColor(if (hasA11y) R.color.status_green else R.color.text_secondary)
+        )
+        // PIN 码设置按钮的文案
+        val hasPin = prefs.pinHash.isNotEmpty()
+        binding.btnChangePin.text = getString(if (hasPin) R.string.pin_change else R.string.pin_setup)
+    }
+
+    private fun startScheduler() {
+        if (prefs.targetPackage.isEmpty()) {
+            Toast.makeText(this, "请先选择要自动打开的应用", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val times = collectTimes()
+        val diag = AlarmScheduler.scheduleAll(this, times)
+
+        // 启动前台服务
+        try {
+            val svcIntent = Intent(this, SchedulerService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(svcIntent)
+            } else {
+                startService(svcIntent)
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+
+        prefs.serviceRunning = true
+        updateUI()
+
+        // 缺悬浮窗权限时给出明确提示（否则到点拉不起应用）
+        val overlayTip = if (!android.provider.Settings.canDrawOverlays(this))
+            "\n\n⚠ 未开启「显示在其他应用上层」，到点后系统会拦截应用弹出。请点下方按钮开启。"
+        else ""
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("定时服务已启动")
+            .setMessage(diag + overlayTip)
+            .setPositiveButton("好", null)
+            .show()
+    }
+
+    private fun stopScheduler() {
+        AlarmScheduler.cancelAll(this)
+        try { stopService(Intent(this, SchedulerService::class.java)) } catch (_: Exception) {}
+        prefs.serviceRunning = false
+        updateUI()
+        Toast.makeText(this, "定时服务已停止", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun collectTimes(): List<String> {
+        val pickers = listOf(binding.time1, binding.time2, binding.time3, binding.time4)
+        val result = mutableListOf<String>()
+        pickers.forEachIndexed { index, picker ->
+            val h = picker.hour
+            val m = picker.minute
+            val timeStr = "%02d:%02d".format(h, m)
+            prefs.setTime(index, timeStr)
+            result.add(timeStr)
+        }
+        return result
+    }
+
+    private fun testLaunchApp() {
+        val pkg = prefs.targetPackage
+        if (pkg.isEmpty()) {
+            Toast.makeText(this, "请先选择要自动打开的应用", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+        if (launchIntent != null) {
+            launchIntent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
+            try {
+                startActivity(launchIntent)
+                Toast.makeText(this, "正在打开: ${prefs.targetAppName}", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "启动失败: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            Toast.makeText(this, "无法打开该应用", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * 模拟闹钟触发 —— 构造和系统闹钟完全一致的 Intent，sendBroadcast 给 AlarmReceiver
+     * 这样能完整测试从广播接收 → 启动目标应用的整条链路
+     */
+    private fun simulateAlarmFire() {
+        if (prefs.targetPackage.isEmpty()) {
+            Toast.makeText(this, "请先选择目标应用", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val now = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val intent = Intent(this, AlarmReceiver::class.java).apply {
+            action = AlarmReceiver.ACTION_TRIGGER
+            putExtra(AlarmReceiver.EXTRA_INDEX, 0)
+            putExtra(AlarmReceiver.EXTRA_TIME, now)
+            putExtra(AlarmReceiver.EXTRA_FORCE, true) // 强制触发，忽略工作日
+        }
+        sendBroadcast(intent)
+        Toast.makeText(this, "已触发模拟闹钟（忽略工作日），请观察结果", Toast.LENGTH_SHORT).show()
+    }
+
+    // ========== 权限相关 ==========
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY_PERM)
+        } else {
+            Toast.makeText(this, "当前系统无需申请", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun ignoreBatteryOptimization() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } else {
+                Toast.makeText(this, "已忽略电池优化 ✓", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun requestExactAlarmPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (am.canScheduleExactAlarms()) {
+                Toast.makeText(this, "已有精确闹钟权限 ✓", Toast.LENGTH_SHORT).show()
+            } else {
+                startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
+            }
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        if (LauncherAccessibilityService.isEnabled(this)) {
+            Toast.makeText(this, "无障碍服务已开启 ✓", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "请在列表中找到「定时启动助手」并打开开关", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
+    private fun requestOverlayPermission() {
+        if (android.provider.Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "已开启悬浮窗权限 ✓", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "请找到「定时启动助手」并打开开关", Toast.LENGTH_LONG).show()
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName")
+                )
+            )
+        }
+    }
+
+    // ========== 结果处理 ==========
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            REQ_APP_PICKER -> {
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    val pkg = data.getStringExtra(AppPickerActivity.EXTRA_PKG) ?: return
+                    val name = data.getStringExtra(AppPickerActivity.EXTRA_NAME) ?: ""
+                    prefs.targetPackage = pkg
+                    prefs.targetAppName = name
+                    loadAppSelection()
+                    Toast.makeText(this, "已选择: $name", Toast.LENGTH_SHORT).show()
+                }
+            }
+            REQ_LOCK -> {
+                if (resultCode != RESULT_OK) {
+                    // 解锁失败，退出
+                    finish()
+                }
+            }
+        }
+    }
+}
