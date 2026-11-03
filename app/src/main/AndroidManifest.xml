@@ -62,11 +62,16 @@
             </intent-filter>
         </receiver>
 
-        <!-- 定时触发广播 -->
+        <!-- 定时触发广播：exported=true 必须开，AlarmManager 通过 PendingIntent 发送广播
+             在 ColorOS/OxygenOS 上 exported=false 会被系统拦截 PendingIntent 触发 -->
         <receiver
             android:name=".AlarmReceiver"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.autolaunch.appscheduler.TRIGGER" />
+            </intent-filter>
+        </receiver>
 
         <!-- 前台服务 (保活) -->
         <service
