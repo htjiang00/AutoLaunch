@@ -9,10 +9,14 @@ import android.util.Log
 import java.util.Calendar
 
 /**
- * 定时调度器 - 使用 AlarmManager 设置四个每日重复闹钟
+ * 定时调度器 - 使用 AlarmManager 设置四个每日闹钟
  *
- * 关键设计：不依赖 PendingIntent 反查来判断状态（国产 ROM 行为不一致），
- * 而是把实际注册结果持久化到 Prefs。
+ * v2.4 关键改动：直接用 PendingIntent.getService 替代 getBroadcast
+ *   AlarmManager → PendingIntent.getService(SchedulerService) → Service.onStartCommand
+ *   彻底绕过 BroadcastReceiver，避开 ColorOS/OxygenOS 对 Receiver 广播的拦截层
+ *
+ *   手动"立即模拟"仍然走 sendBroadcast → AlarmReceiver（测试用）
+ *   但真正的定时触发走 Service 直达路径
  */
 object AlarmScheduler {
 
@@ -20,9 +24,20 @@ object AlarmScheduler {
     const val REQUEST_CODE_BASE = 1000
 
     /**
-     * 构造 Intent —— 设置/取消/查询三处必须完全一致
+     * 构造指向 SchedulerService 的 Intent —— 闹钟触发时直接启动前台服务
      */
-    fun buildIntent(context: Context, index: Int): Intent {
+    fun buildServiceIntent(context: Context, index: Int, timeStr: String): Intent {
+        return Intent(context, SchedulerService::class.java).apply {
+            action = SchedulerService.ACTION_ALARM_TRIGGER
+            putExtra(SchedulerService.EXTRA_TIME, timeStr)
+            putExtra(SchedulerService.EXTRA_INDEX, index)
+        }
+    }
+
+    /**
+     * 构造指向 AlarmReceiver 的 Intent —— 手动触发测试用
+     */
+    fun buildBroadcastIntent(context: Context, index: Int): Intent {
         return Intent(context, AlarmReceiver::class.java).apply {
             action = AlarmReceiver.ACTION_TRIGGER
             putExtra(AlarmReceiver.EXTRA_INDEX, index)
@@ -42,6 +57,10 @@ object AlarmScheduler {
 
     /**
      * 为四个时间点分别设置每日闹钟，返回可读结果
+     *
+     * 用 PendingIntent.getForegroundService（Oreo 8+）
+     * 或 PendingIntent.getService（Marshmallow 6+ / Nougat 7）
+     * 直接让系统拉起 SchedulerService
      */
     fun scheduleAll(context: Context, times: List<String>): String {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -73,16 +92,13 @@ object AlarmScheduler {
                 }
             }
 
-            val intent = buildIntent(context, index).apply {
-                putExtra(AlarmReceiver.EXTRA_TIME, timeStr)
-            }
+            val intent = buildServiceIntent(context, index, timeStr)
 
-            val pi = PendingIntent.getBroadcast(
-                context,
-                REQUEST_CODE_BASE + index,
-                intent,
-                piFlags(updatable = true)
-            )
+            val pi = createServicePendingIntent(context, REQUEST_CODE_BASE + index, intent)
+            if (pi == null) {
+                result.append("✗ $timeStr PendingIntent 创建失败\n")
+                return@forEachIndexed
+            }
 
             val triggerAt = calendar.timeInMillis
             val shown = android.text.format.DateFormat.format("MM-dd HH:mm", triggerAt).toString()
@@ -94,7 +110,6 @@ object AlarmScheduler {
             }
         }
 
-        // 持久化注册结果
         prefs.scheduledCount = successCount
         prefs.nextAlarmAt = if (successCount > 0) earliest else 0L
 
@@ -104,13 +119,7 @@ object AlarmScheduler {
     }
 
     /**
-     * 三级降级：setExactAndAllowWhileIdle → setExact → set（永不失败）
-     *
-     * 不使用 setAlarmClock：
-     *   1. 国产 ROM 行为不一致，部分 ColorOS 上触发后 PendingIntent 不会回调
-     *   2. setAlarmClock 是一次性闹钟，触发后需手动重建，但如果进程在 Receiver 执行后被杀
-     *      就错过了重建时机
-     *   3. setExactAndAllowWhileIdle 同样精确且不受 Doze 限制，更稳定
+     * 三级降级：setExactAndAllowWhileIdle → setExact → set
      */
     private fun setOne(
         am: AlarmManager,
@@ -120,7 +129,6 @@ object AlarmScheduler {
         timeStr: String,
         shown: String
     ): Boolean {
-        // 1. setExactAndAllowWhileIdle：精确闹钟 + 省电模式也能触发
         if (canScheduleExactRuntime(am)) {
             try {
                 am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
@@ -129,7 +137,6 @@ object AlarmScheduler {
             } catch (e: Exception) {
                 Log.w(TAG, "setExactAndAllowWhileIdle 失败: ${e.message}")
             }
-            // 2. setExact：精确但不保证省电模式
             try {
                 am.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pi)
                 result.append("✓ $timeStr → $shown  [精确]\n")
@@ -138,7 +145,6 @@ object AlarmScheduler {
                 Log.w(TAG, "setExact 失败: ${e.message}")
             }
         }
-        // 3. set：非精确闹钟，不需要特殊权限，一定成功
         return try {
             am.set(AlarmManager.RTC_WAKEUP, triggerAt, pi)
             result.append("✓ $timeStr → $shown  [非精确]\n")
@@ -154,18 +160,51 @@ object AlarmScheduler {
     }
 
     /**
-     * 取消所有闹钟
+     * 创建指向 Service 的 PendingIntent —— 根据 Android 版本选择方法
+     */
+    private fun createServicePendingIntent(
+        context: Context,
+        requestCode: Int,
+        intent: Intent
+    ): PendingIntent? {
+        val flags = piFlags(updatable = true)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(context, requestCode, intent, flags)
+            } else {
+                PendingIntent.getService(context, requestCode, intent, flags)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "PendingIntent.getForegroundService 失败，退回 getService: ${e.message}")
+            try {
+                PendingIntent.getService(context, requestCode, intent, flags)
+            } catch (e2: Exception) {
+                Log.e(TAG, "getService 也失败: ${e2.message}")
+                null
+            }
+        }
+    }
+
+    /**
+     * 取消所有闹钟 —— 用和注册时完全一致的 PendingIntent 才能 cancel 掉
      */
     fun cancelAll(context: Context, prefs: Prefs = Prefs(context)) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         for (i in 0..3) {
-            val pi = PendingIntent.getBroadcast(
+            // 必须用和 scheduleAll 完全一致的 Intent/PendingIntent 才能 cancel 到
+            val intent = buildServiceIntent(context, i, "00:00")
+            val pi = createServicePendingIntent(context, REQUEST_CODE_BASE + i, intent)
+            if (pi != null) {
+                try { am.cancel(pi) } catch (_: Exception) {}
+            }
+            // 也尝试 cancel 旧的 Broadcast PendingIntent（升级 v2.4 前留下的）
+            val oldPi = PendingIntent.getBroadcast(
                 context,
                 REQUEST_CODE_BASE + i,
-                buildIntent(context, i),
-                piFlags(updatable = true)
+                buildBroadcastIntent(context, i),
+                piFlags(updatable = false)
             )
-            try { am.cancel(pi) } catch (_: Exception) {}
+            try { am.cancel(oldPi) } catch (_: Exception) {}
         }
         prefs.scheduledCount = 0
         prefs.nextAlarmAt = 0L
@@ -197,12 +236,20 @@ object AlarmScheduler {
             sb.append("【精确闹钟权限】${if (am.canScheduleExactAlarms()) "✓ 已授权" else "✗ 未授权"}\n")
         }
 
-        sb.append("【无障碍服务】${if (LauncherAccessibilityService.isEnabled(context)) "✓ 已开启（可后台启动）" else "✗ 未开启"}\n")
-        sb.append("【悬浮窗权限】${if (android.provider.Settings.canDrawOverlays(context)) "✓ 已授权" else "✗ 未授权（到点弹不出应用）"}\n")
+        sb.append("【无障碍服务】${if (LauncherAccessibilityService.isEnabled(context)) "✓ 已开启" else "✗ 未开启"}\n")
+        sb.append("【悬浮窗权限】${if (android.provider.Settings.canDrawOverlays(context)) "✓ 已授权" else "✗ 未授权"}\n")
         sb.append("【服务运行标记】${prefs.serviceRunning}\n")
-        sb.append("【工作日模式】${if (prefs.workdaysOnly) "开（周六日跳过）" else "关（每天触发）"}，今天${if (AlarmReceiver.isWorkdayToday()) "是工作日" else "是周末"}\n")
+        sb.append("【工作日模式】${if (prefs.workdaysOnly) "开" else "关"}，今天${if (AlarmReceiver.isWorkdayToday()) "是工作日" else "是周末"}\n")
         sb.append("【目标应用】${prefs.targetPackage.ifEmpty { "未设置" }}\n")
-        sb.append("【系统版本】Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        sb.append("【触发方式】AlarmManager → PendingIntent.getService → SchedulerService\n")
+        sb.append("【系统版本】Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+        val verName = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        } catch (_: Exception) { "?" }
+        sb.append("【App 版本】$verName\n")
+        sb.append("\n【触发记录】\n")
+        val log = prefs.fireLog
+        sb.append(if (log.isBlank()) "（暂无，说明闹钟从未被系统叫醒）\n" else "$log\n")
 
         Log.i(TAG, "诊断:\n$sb")
         return sb.toString()
