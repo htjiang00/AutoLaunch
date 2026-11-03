@@ -35,6 +35,7 @@ class AlarmReceiver : BroadcastReceiver() {
             Log.i(TAG, "time=$time, force=$force")
 
             val prefs = Prefs(context)
+            prefs.appendFireLog("收到广播 time=$time force=$force")
 
             // 工作日模式：周末到点自动跳过（手动强制触发时不受此限制）
             if (!force && prefs.workdaysOnly && !isWorkdayToday()) {
