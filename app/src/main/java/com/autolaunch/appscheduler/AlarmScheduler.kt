@@ -104,7 +104,13 @@ object AlarmScheduler {
     }
 
     /**
-     * 三级降级：setAlarmClock → setExactAndAllowWhileIdle → set（永不失败）
+     * 三级降级：setExactAndAllowWhileIdle → setExact → set（永不失败）
+     *
+     * 不使用 setAlarmClock：
+     *   1. 国产 ROM 行为不一致，部分 ColorOS 上触发后 PendingIntent 不会回调
+     *   2. setAlarmClock 是一次性闹钟，触发后需手动重建，但如果进程在 Receiver 执行后被杀
+     *      就错过了重建时机
+     *   3. setExactAndAllowWhileIdle 同样精确且不受 Doze 限制，更稳定
      */
     private fun setOne(
         am: AlarmManager,
@@ -114,22 +120,22 @@ object AlarmScheduler {
         timeStr: String,
         shown: String
     ): Boolean {
-        // 1. setAlarmClock：优先级最高，锁屏也会唤醒
+        // 1. setExactAndAllowWhileIdle：精确闹钟 + 省电模式也能触发
         if (canScheduleExactRuntime(am)) {
             try {
-                am.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAt, pi), pi)
-                result.append("✓ $timeStr → $shown  [精确]\n")
-                return true
-            } catch (e: Exception) {
-                Log.w(TAG, "setAlarmClock 失败: ${e.message}")
-            }
-            // 2. setExactAndAllowWhileIdle
-            try {
                 am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
-                result.append("✓ $timeStr → $shown  [精确/省电]\n")
+                result.append("✓ $timeStr → $shown  [精确+省电]\n")
                 return true
             } catch (e: Exception) {
                 Log.w(TAG, "setExactAndAllowWhileIdle 失败: ${e.message}")
+            }
+            // 2. setExact：精确但不保证省电模式
+            try {
+                am.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+                result.append("✓ $timeStr → $shown  [精确]\n")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "setExact 失败: ${e.message}")
             }
         }
         // 3. set：非精确闹钟，不需要特殊权限，一定成功
