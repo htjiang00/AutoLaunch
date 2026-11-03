@@ -24,51 +24,60 @@ class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_TRIGGER) return
 
-        val time = intent.getStringExtra(EXTRA_TIME) ?: ""
-        val force = intent.getBooleanExtra(EXTRA_FORCE, false)
-        Log.i(TAG, "===== 闹钟触发 =====")
-        Log.i(TAG, "time=$time, force=$force")
-
-        val prefs = Prefs(context)
-
-        // 工作日模式：周末到点自动跳过（手动强制触发时不受此限制）
-        if (!force && prefs.workdaysOnly && !isWorkdayToday()) {
-            Log.i(TAG, "今天是周末，工作日模式开启，跳过启动")
-            AlarmScheduler.scheduleAll(context, prefs.getTimes())
-            return
-        }
-
-        val pkg = prefs.targetPackage
-        if (pkg.isEmpty()) {
-            Log.w(TAG, "未设置目标应用，跳过启动")
-            AlarmScheduler.scheduleAll(context, prefs.getTimes())
-            return
-        }
-
-        // 第1步：把启动请求写入 Prefs（持久化，进程重建也不会丢）
-        prefs.writePendingLaunch(pkg, time)
-        Log.i(TAG, "已写入 pendingLaunch: $pkg | $time")
-
-        // 第2步：唤醒前台服务处理
+        // goAsync() 保证 onReceive 返回后进程还能活 30 秒，用来完成：
+        //   1. 启动前台服务（进程不被杀）
+        //   2. scheduleAll 重设明天的闹钟（进程不被杀）
+        val pendingResult = goAsync()
         try {
-            val svcIntent = Intent(context, SchedulerService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(svcIntent)
-            } else {
-                context.startService(svcIntent)
+            val time = intent.getStringExtra(EXTRA_TIME) ?: ""
+            val force = intent.getBooleanExtra(EXTRA_FORCE, false)
+            Log.i(TAG, "===== 闹钟触发 =====")
+            Log.i(TAG, "time=$time, force=$force")
+
+            val prefs = Prefs(context)
+
+            // 工作日模式：周末到点自动跳过（手动强制触发时不受此限制）
+            if (!force && prefs.workdaysOnly && !isWorkdayToday()) {
+                Log.i(TAG, "今天是周末，工作日模式开启，跳过启动")
+                AlarmScheduler.scheduleAll(context, prefs.getTimes())
+                return
             }
-            Log.i(TAG, "SchedulerService 已请求启动")
-        } catch (e: Exception) {
-            Log.w(TAG, "SchedulerService 启动失败: ${e.message}")
-        }
 
-        // 第3步：唤醒无障碍服务（如果开启了）
-        if (LauncherAccessibilityService.isEnabled(context)) {
-            Log.i(TAG, "无障碍服务已开启，等待它处理 pendingLaunch")
-        }
+            val pkg = prefs.targetPackage
+            if (pkg.isEmpty()) {
+                Log.w(TAG, "未设置目标应用，跳过启动")
+                AlarmScheduler.scheduleAll(context, prefs.getTimes())
+                return
+            }
 
-        prefs.serviceRunning = true
-        AlarmScheduler.scheduleAll(context, prefs.getTimes())
+            // 第1步：把启动请求写入 Prefs（持久化，进程重建也不会丢）
+            prefs.writePendingLaunch(pkg, time)
+            Log.i(TAG, "已写入 pendingLaunch: $pkg | $time")
+
+            // 第2步：唤醒前台服务处理
+            try {
+                val svcIntent = Intent(context, SchedulerService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(svcIntent)
+                } else {
+                    context.startService(svcIntent)
+                }
+                Log.i(TAG, "SchedulerService 已请求启动")
+            } catch (e: Exception) {
+                Log.w(TAG, "SchedulerService 启动失败: ${e.message}")
+            }
+
+            // 第3步：唤醒无障碍服务（如果开启了）
+            if (LauncherAccessibilityService.isEnabled(context)) {
+                Log.i(TAG, "无障碍服务已开启，等待它处理 pendingLaunch")
+            }
+
+            prefs.serviceRunning = true
+            // 第4步：重设明天的闹钟（必须在 goAsync 块里，进程才不会被杀）
+            AlarmScheduler.scheduleAll(context, prefs.getTimes())
+        } finally {
+            pendingResult.finish()
+        }
     }
 
     companion object {
