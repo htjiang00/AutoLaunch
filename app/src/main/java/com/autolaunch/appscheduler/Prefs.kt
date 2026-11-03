@@ -85,6 +85,23 @@ class Prefs(context: Context) {
         return if (parts.size == 2) parts[0] to parts[1] else null
     }
 
+    /** 触发日志 —— 记录每次闹钟是否真的被系统叫醒，用于诊断 */
+    var fireLog: String
+        get() = sp.getString(KEY_FIRE_LOG, "") ?: ""
+        set(value) = sp.edit().putString(KEY_FIRE_LOG, value).apply()
+
+    fun appendFireLog(line: String) {
+        val ts = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val entry = "[$ts] $line"
+        val lines = fireLog.lines().filter { it.isNotBlank() } + entry
+        fireLog = lines.takeLast(15).joinToString("\n")
+    }
+
+    fun clearFireLog() {
+        fireLog = ""
+    }
+
     // 四个时间点，格式 "HH:mm"
     fun getTimes(): List<String> {
         val list = mutableListOf<String>()
@@ -109,6 +126,7 @@ class Prefs(context: Context) {
         private const val KEY_PIN_HASH = "pin_hash"
         private const val KEY_WORKDAYS_ONLY = "workdays_only"
         private const val KEY_PENDING_LAUNCH = "pending_launch"
+        private const val KEY_FIRE_LOG = "fire_log"
         val DEFAULT_TIMES = listOf("08:10", "11:45", "14:10", "17:45")
 
         private fun sha256(input: String): String {
